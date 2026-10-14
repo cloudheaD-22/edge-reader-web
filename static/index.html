@@ -102,23 +102,46 @@ $('file').onchange=async()=>{
 };
 
 /* ---------- Playback ---------- */
+/* ---------- Audio cache / prefetch (keeps only current + next) ---------- */
+const cache=new Map(); // key -> {i,p:Promise<Blob>,ctrl:AbortController}
+const keyOf=(i,v,sp)=>`${i}|${v}|${(+sp).toFixed(2)}`;
+function getAudio(i,v,sp){
+ const k=keyOf(i,v,sp);if(cache.has(k))return cache.get(k).p;
+ const ctrl=new AbortController();
+ const p=fetch('/api/synthesize',{method:'POST',signal:ctrl.signal,headers:{'Content-Type':'application/json'},body:JSON.stringify({text:chapters[i].text,voice:v,speed:+sp})})
+  .then(async r=>{if(!r.ok)throw new Error(await r.text());return r.blob()});
+ p.catch(()=>{if(cache.get(k)?.p===p)cache.delete(k)}); // failed -> allow retry
+ cache.set(k,{i,p,ctrl});return p;
+}
+function prune(keep){for(const [k,e] of cache)if(!keep.includes(k)){e.ctrl.abort();cache.delete(k)}}
+function curKey(){return cur>=0?keyOf(cur,curVoice,genSpeed):null}
+function prefetchNext(){
+ if(cur<0)return;const n=cur+1,v=$('voice').value,sp=+$('speed').value;
+ const keep=[curKey()];
+ if(n<chapters.length){const k=keyOf(n,v,sp);keep.push(k);getAudio(n,v,sp).catch(()=>{})}
+ prune(keep);
+}
+let curVoice='',pfTimer=0;
+const schedulePrefetch=()=>{clearTimeout(pfTimer);pfTimer=setTimeout(()=>{if(au.src&&genIdx<0)prefetchNext()},1200)};
+
 async function play(i,pos){if(i<0||i>=chapters.length)return;const tok=++playToken;
- cur=i;genIdx=i;S.cur=i;S.pos=pos||0;S.dur=0;save();au.pause();render(true);
- $('status').textContent='Generating audio for “'+chapters[i].title+'”… (long chapters take a bit)';
- genSpeed=+$('speed').value;
+ cur=i;S.cur=i;S.pos=pos||0;S.dur=0;save();au.pause();
+ genSpeed=+$('speed').value;curVoice=$('voice').value;
+ const k=keyOf(i,curVoice,genSpeed),ready=cache.has(k);
+ prune([k]); // drop stale entries (keeps this chapter if prefetched/in-flight)
+ genIdx=i;render(true);
+ $('status').textContent=ready?'Loading prefetched audio…':'Generating audio for “'+chapters[i].title+'”… (long chapters take a bit)';
  try{
-  const r=await fetch('/api/synthesize',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({text:chapters[i].text,voice:$('voice').value,speed:genSpeed})});
-  if(tok!==playToken)return;
-  if(!r.ok){genIdx=-1;render();$('status').textContent='❌ Error: '+await r.text();return}
-  const blob=await r.blob();if(tok!==playToken)return;
+  const blob=await getAudio(i,curVoice,genSpeed);if(tok!==playToken)return;
   if(url)URL.revokeObjectURL(url);url=URL.createObjectURL(blob);au.src=url;au.playbackRate=1;
   au.onloadedmetadata=()=>{if(pos)au.currentTime=pos;S.dur=au.duration;save();updateNP();};
   genIdx=-1;render();au.play().catch(()=>{});$('status').textContent='';
- }catch(e){if(tok===playToken){genIdx=-1;render();$('status').textContent='❌ Network error generating audio.'}}
+  prefetchNext();
+ }catch(e){if(tok===playToken){genIdx=-1;render();$('status').textContent=e.name==='AbortError'?'':'❌ Error: '+(e.message||'network error generating audio')}}
 }
 $('speed').oninput=()=>{const s=+$('speed').value;$('sp').textContent=s.toFixed(1)+'x';S.speed=s;save();
- if(au.src)au.playbackRate=Math.min(4,Math.max(0.25,s/genSpeed));};
-$('voice').onchange=()=>{S.voice=$('voice').value;save()};
+ if(au.src)au.playbackRate=Math.min(4,Math.max(0.25,s/genSpeed));schedulePrefetch();};
+$('voice').onchange=()=>{S.voice=$('voice').value;save();schedulePrefetch()};
 $('allv').onchange=()=>{S.all=$('allv').checked;save();loadVoices()};
 $('regen').onclick=()=>play(cur,0);$('next').onclick=()=>play(cur+1,0);$('prev').onclick=()=>play(cur-1,0);
 au.onended=()=>{S.pos=0;save();play(cur+1,0)};

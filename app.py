@@ -1,5 +1,5 @@
 """Edge Reader Web - upload chapters, listen with Microsoft Edge neural voices."""
-import io, re, os, zipfile
+import asyncio, io, re, os, zipfile
 from pathlib import Path
 import edge_tts
 from fastapi import FastAPI, UploadFile, File, HTTPException
@@ -158,7 +158,7 @@ async def voices(all: bool = False):
     vs = _voices if all else [v for v in _voices if v["Locale"].startswith("en-")]
     return [{"name": v["ShortName"], "locale": v["Locale"], "gender": v["Gender"]} for v in vs]
 
-def chunks(text: str, size: int = 3000):
+def chunks(text: str, size: int = 1800):
     sents = re.split(r"(?<=[.!?…\"”])\s+|\n+", text)
     cur = ""
     for s in sents:
@@ -171,6 +171,8 @@ def chunks(text: str, size: int = 3000):
         else:
             cur = f"{cur} {s}" if cur else s
     if cur: yield cur
+
+SYNTH_CONCURRENCY = 4
 
 def rate_str(speed: float) -> str:
     speed = max(0.5, min(3.0, speed))
@@ -185,12 +187,31 @@ class SynthReq(BaseModel):
 async def synthesize(req: SynthReq):
     if not req.text.strip():
         raise HTTPException(400, "Empty text")
-    out = bytearray()
-    for part in chunks(req.text):
-        comm = edge_tts.Communicate(part, req.voice, rate=rate_str(req.speed))
-        async for ev in comm.stream():
-            if ev["type"] == "audio":
-                out += ev["data"]
+    rate = rate_str(req.speed)
+    sem = asyncio.Semaphore(SYNTH_CONCURRENCY)
+
+    async def synth_one(part: str) -> bytes:
+        async with sem:
+            for attempt in range(2):  # one retry
+                try:
+                    buf = bytearray()
+                    async for ev in edge_tts.Communicate(part, req.voice, rate=rate).stream():
+                        if ev["type"] == "audio":
+                            buf += ev["data"]
+                    if not buf:
+                        raise RuntimeError("no audio returned")
+                    return bytes(buf)
+                except Exception as e:
+                    if attempt:
+                        raise
+                    log.warning("chunk synth failed (%s); retrying once", e)
+                    await asyncio.sleep(0.5)
+
+    try:
+        parts = await asyncio.gather(*(synth_one(c) for c in chunks(req.text)))
+    except Exception as e:
+        raise HTTPException(502, f"Speech service error: {e}")
+    out = b"".join(parts)  # gather preserves input order
     return Response(bytes(out), media_type="audio/mpeg")
 
 @app.get("/")
