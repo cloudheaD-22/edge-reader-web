@@ -5,17 +5,34 @@
 *{box-sizing:border-box}body{font-family:system-ui,sans-serif;margin:0;background:#111;color:#eee}
 main{max-width:700px;margin:auto;padding:14px}h1{font-size:1.4rem}
 button,select,label.up{font-size:1.05rem;min-height:48px;border-radius:10px;border:0;padding:0 14px;background:#2d6cdf;color:#fff}
-select{background:#222;color:#eee;width:100%}button.sec{background:#333}
+select{background:#222;color:#eee;width:100%}button.sec{background:#333}button:disabled{opacity:.5}
 .row{display:flex;gap:8px;margin:10px 0;align-items:center;flex-wrap:wrap}.row>*{flex:1}
 input[type=range]{width:100%;height:40px}label.up{display:flex;align-items:center;justify-content:center}
-#list{list-style:none;padding:0}#list li{padding:14px;margin:6px 0;background:#1d1d1d;border-radius:10px;cursor:pointer}
-#list li.on{background:#2d6cdf}#list small{opacity:.7;display:block}
+label.up.busy{opacity:.6;pointer-events:none}
+#list{list-style:none;padding:0}#list li{padding:14px;margin:6px 0;background:#1d1d1d;border-radius:10px;cursor:pointer;border-left:6px solid transparent}
+#list li.on{background:#1f3b6e;border-left-color:#5b9bff}#list li.gen{border-left-color:#f0b429}
+#list small{opacity:.7;display:block}#list .tag{float:right;font-size:.85rem;opacity:.9}
 audio{width:100%;margin-top:8px}#status{opacity:.8;min-height:1.3em}
-#bar{position:sticky;top:0;background:#111;padding-bottom:6px}
+#bar{position:sticky;top:0;background:#111;padding-bottom:6px;z-index:5;box-shadow:0 6px 8px -6px #000}
+#np{background:#1d1d1d;border-radius:12px;padding:12px;margin-top:8px}
+#npTitle{font-weight:600;font-size:1.1rem;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+#npSub{opacity:.75;font-size:.9rem;margin-top:2px}
+.prog{height:10px;background:#333;border-radius:5px;overflow:hidden;margin-top:8px}
+.prog>div{height:100%;width:0;background:#5b9bff;transition:width .2s}
+#npProg.gen>div{width:100%!important;background:repeating-linear-gradient(45deg,#f0b429 0 10px,#c48a10 10px 20px);background-size:28px 28px;animation:mv 1s linear infinite}
+@keyframes mv{to{background-position:28px 0}}
+#npTime{display:flex;justify-content:space-between;font-size:.85rem;opacity:.75;margin-top:4px;font-variant-numeric:tabular-nums}
+#up{display:none;background:#1d1d1d;border-radius:12px;padding:12px}
+#upText{display:flex;justify-content:space-between;font-size:.95rem;gap:8px}
+#up.err{background:#4a1d1d}#up.ok{background:#1d3a24}#up.ok .prog,#up.err .prog{display:none}
+#upProg.proc>div{width:100%!important;background:repeating-linear-gradient(45deg,#5b9bff 0 10px,#3a72d0 10px 20px);background-size:28px 28px;animation:mv 1s linear infinite}
 </style></head><body><main>
 <div class="row"><h1 style="flex:1">📖 Edge Reader</h1><form method="post" action="/logout" style="flex:0 0 auto"><button class="sec">Logout</button></form></div>
-<div class="row"><label class="up">📂 Upload chapters<input id="file" type="file" multiple accept=".txt,.md,.docx,.pdf,.epub" hidden></label></div>
+<div class="row"><label class="up" id="upBtn">📂 Upload chapters<input id="file" type="file" multiple accept=".txt,.md,.docx,.pdf,.epub" hidden></label></div>
+<div id="up"><div id="upText"><span id="upMsg"></span><span id="upPct"></span></div><div class="prog" id="upProg"><div></div></div></div>
 <div id="bar">
+<div id="np"><div id="npTitle">Nothing playing</div><div id="npSub">Upload a file and tap a chapter</div>
+<div class="prog" id="npProg"><div></div></div><div id="npTime"><span id="tCur">0:00</span><span id="tDur">0:00</span></div></div>
 <div class="row"><select id="voice"></select></div>
 <div class="row"><label style="flex:0 0 auto"><input type="checkbox" id="allv"> All languages</label></div>
 <div class="row"><span style="flex:0 0 70px">Speed <b id="sp">1.0x</b></span><input id="speed" type="range" min="0.5" max="3" step="0.1" value="1"></div>
@@ -26,37 +43,88 @@ audio{width:100%;margin-top:8px}#status{opacity:.8;min-height:1.3em}
 <ul id="list"></ul>
 </main><script>
 const $=id=>document.getElementById(id),au=$('au'),S=JSON.parse(localStorage.er||'{}');
-let chapters=JSON.parse(localStorage.erCh||'[]'),cur=S.cur??-1,url=null,genSpeed=1;
+let chapters=JSON.parse(localStorage.erCh||'[]'),cur=S.cur??-1,url=null,genSpeed=1,genIdx=-1,playToken=0;
 const _f=window.fetch;window.fetch=async(...a)=>{const r=await _f(...a);if(r.status==401)location.href='/login';return r};
 const save=()=>{localStorage.er=JSON.stringify(S)};
+const esc=s=>String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+const fmt=t=>{if(!isFinite(t)||t<0)t=0;t=Math.floor(t);const h=Math.floor(t/3600),m=Math.floor(t%3600/60),s=String(t%60).padStart(2,'0');return h?`${h}:${String(m).padStart(2,'0')}:${s}`:`${m}:${s}`};
+const mb=b=>(b/1048576).toFixed(1);
 $('speed').value=S.speed||1;$('sp').textContent=(+$('speed').value).toFixed(1)+'x';$('allv').checked=!!S.all;
 async function loadVoices(){const v=await (await fetch('/api/voices?all='+$('allv').checked)).json();
- $('voice').innerHTML=v.map(x=>`<option value="${x.name}">${x.name} (${x.gender})</option>`).join('');
+ $('voice').innerHTML=v.map(x=>`<option value="${esc(x.name)}">${esc(x.name)} (${esc(x.gender)})</option>`).join('');
  $('voice').value=S.voice&&v.some(x=>x.name==S.voice)?S.voice:'en-US-AriaNeural';}
-function render(){$('list').innerHTML=chapters.map((c,i)=>`<li class="${i==cur?'on':''}" data-i="${i}">${c.title}<small>${c.source} · ${Math.round(c.chars/1000*10)/10}k chars</small></li>`).join('');}
+
+/* ---------- Now playing ---------- */
+function updateNP(){
+ const c=chapters[cur];
+ $('npTitle').textContent=c?c.title:'Nothing playing';
+ let sub=c?`Chapter ${cur+1} of ${chapters.length}`:(chapters.length?`${chapters.length} chapters loaded — tap one to play`:'Upload a file and tap a chapter');
+ if(genIdx>=0)sub=`⏳ Generating audio for chapter ${genIdx+1} of ${chapters.length}…`;
+ else if(c&&au.src&&!au.paused)sub+=' · ▶ Playing';else if(c&&au.src)sub+=' · ⏸ Paused';
+ $('npSub').textContent=sub;
+ $('npProg').classList.toggle('gen',genIdx>=0);
+ const d=au.src&&isFinite(au.duration)?au.duration:(S.dur||0),t=au.src?au.currentTime:(S.pos||0);
+ $('npProg').firstElementChild.style.width=(d?Math.min(100,t/d*100):0)+'%';
+ $('tCur').textContent=fmt(t);$('tDur').textContent=d?fmt(d):'--:--';
+}
+function render(scroll){
+ $('list').innerHTML=chapters.map((c,i)=>`<li class="${i==cur?'on':''}${i==genIdx?' gen':''}" data-i="${i}"><span class="tag">${i==genIdx?'⏳ Generating…':i==cur?'🔊 Now playing':''}</span>${esc(c.title)}<small>${i+1}/${chapters.length} · ${esc(c.source)} · ${Math.round(c.chars/100)/10}k chars</small></li>`).join('');
+ updateNP();
+ if(scroll){const li=$('list').querySelector('li.on');if(li){const top=li.getBoundingClientRect().top+scrollY-$('bar').offsetHeight-12;scrollTo({top,behavior:'smooth'})}}
+}
 $('list').onclick=e=>{const li=e.target.closest('li');if(li)play(+li.dataset.i,0)};
-$('file').onchange=async()=>{const fd=new FormData();for(const f of $('file').files)fd.append('files',f);
- $('status').textContent='Reading files…';const r=await fetch('/api/upload',{method:'POST',body:fd});
- if(!r.ok){$('status').textContent='Upload failed: '+(await r.text());return}
- chapters=(await r.json()).chapters;try{localStorage.erCh=JSON.stringify(chapters)}catch(e){}
- cur=-1;S.cur=-1;S.pos=0;save();render();$('status').textContent=chapters.length+' chapter(s) loaded. Tap one to play.';};
-async function play(i,pos){if(i<0||i>=chapters.length)return;cur=i;S.cur=i;save();render();
+
+/* ---------- Upload with progress ---------- */
+function upState(cls,msg,pct){const u=$('up');u.style.display='block';u.className=cls||'';$('upMsg').textContent=msg;$('upPct').textContent=pct||'';}
+$('file').onchange=()=>{
+ const files=[...$('file').files];if(!files.length)return;
+ const fd=new FormData();files.forEach(f=>fd.append('files',f));
+ const total=files.reduce((a,f)=>a+f.size,0),bar=$('upProg'),fill=bar.firstElementChild;
+ bar.classList.remove('proc');fill.style.width='0%';$('upBtn').classList.add('busy');
+ upState('',`Uploading ${files.length} file(s)…`,`0% · 0.0 / ${mb(total)} MB`);
+ const x=new XMLHttpRequest();x.open('POST','/api/upload');x.responseType='json';
+ x.upload.onprogress=e=>{const tot=e.lengthComputable?e.total:total,p=tot?Math.round(e.loaded/tot*100):0;
+  fill.style.width=p+'%';upState('',p<100?`Uploading ${files.length} file(s)…`:'Processing chapters…',`${p}% · ${mb(e.loaded)} / ${mb(tot)} MB`);
+  if(p>=100)bar.classList.add('proc');};
+ x.upload.onload=()=>{bar.classList.add('proc');upState('','Processing chapters…','100%');};
+ const done=()=>{$('upBtn').classList.remove('busy');$('file').value='';};
+ x.onload=()=>{done();
+  if(x.status==401){location.href='/login';return}
+  if(x.status<200||x.status>=300){const d=x.response&&x.response.detail;upState('err','❌ Upload failed: '+(typeof d=='string'?d:`server error ${x.status}`));return}
+  chapters=x.response.chapters;try{localStorage.erCh=JSON.stringify(chapters)}catch(e){}
+  cur=-1;S.cur=-1;S.pos=0;S.dur=0;save();render();
+  upState('ok',`✅ Loaded ${chapters.length} chapter${chapters.length==1?'':'s'} from ${files.length} file${files.length==1?'':'s'}. Tap one to play.`);
+  $('status').textContent='';};
+ x.onerror=()=>{done();upState('err','❌ Upload failed: network error. Check your connection and try again.')};
+ x.ontimeout=()=>{done();upState('err','❌ Upload timed out.')};
+ x.send(fd);
+};
+
+/* ---------- Playback ---------- */
+async function play(i,pos){if(i<0||i>=chapters.length)return;const tok=++playToken;
+ cur=i;genIdx=i;S.cur=i;S.pos=pos||0;S.dur=0;save();au.pause();render(true);
  $('status').textContent='Generating audio for “'+chapters[i].title+'”… (long chapters take a bit)';
  genSpeed=+$('speed').value;
- const r=await fetch('/api/synthesize',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({text:chapters[i].text,voice:$('voice').value,speed:genSpeed})});
- if(!r.ok){$('status').textContent='Error: '+await r.text();return}
- if(url)URL.revokeObjectURL(url);url=URL.createObjectURL(await r.blob());au.src=url;au.playbackRate=1;
- au.onloadedmetadata=()=>{if(pos)au.currentTime=pos;};au.play();$('status').textContent='Playing: '+chapters[i].title;}
+ try{
+  const r=await fetch('/api/synthesize',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({text:chapters[i].text,voice:$('voice').value,speed:genSpeed})});
+  if(tok!==playToken)return;
+  if(!r.ok){genIdx=-1;render();$('status').textContent='❌ Error: '+await r.text();return}
+  const blob=await r.blob();if(tok!==playToken)return;
+  if(url)URL.revokeObjectURL(url);url=URL.createObjectURL(blob);au.src=url;au.playbackRate=1;
+  au.onloadedmetadata=()=>{if(pos)au.currentTime=pos;S.dur=au.duration;save();updateNP();};
+  genIdx=-1;render();au.play().catch(()=>{});$('status').textContent='';
+ }catch(e){if(tok===playToken){genIdx=-1;render();$('status').textContent='❌ Network error generating audio.'}}
+}
 $('speed').oninput=()=>{const s=+$('speed').value;$('sp').textContent=s.toFixed(1)+'x';S.speed=s;save();
  if(au.src)au.playbackRate=Math.min(4,Math.max(0.25,s/genSpeed));};
 $('voice').onchange=()=>{S.voice=$('voice').value;save()};
 $('allv').onchange=()=>{S.all=$('allv').checked;save();loadVoices()};
 $('regen').onclick=()=>play(cur,0);$('next').onclick=()=>play(cur+1,0);$('prev').onclick=()=>play(cur-1,0);
 au.onended=()=>{S.pos=0;save();play(cur+1,0)};
-au.ontimeupdate=()=>{S.pos=au.currentTime;save()};
+let lastSave=0;au.ontimeupdate=()=>{S.pos=au.currentTime;const n=Date.now();if(n-lastSave>1000){save();lastSave=n}updateNP()};
+au.onplay=au.onpause=updateNP;
 $('dl').onclick=()=>{if(!url)return;const a=document.createElement('a');a.href=url;a.download=(chapters[cur]?.title||'chapter')+'.mp3';a.click()};
-loadVoices();render();if(cur>=0&&chapters[cur])$('status').textContent='Last: “'+chapters[cur].title+'” — tap ▶ to resume or pick a chapter.';
-$('regen').ondblclick=null;
-// Resume: first tap on current chapter continues from saved position
-if(cur>=0&&chapters[cur]){$('regen').textContent='▶ Resume';$('regen').onclick=()=>{$('regen').textContent='🔄 Regenerate';$('regen').onclick=()=>play(cur,0);play(cur,S.pos||0)}}
+loadVoices();render(true);
+if(cur>=0&&chapters[cur]){$('status').textContent='Last: “'+chapters[cur].title+'” at '+fmt(S.pos)+' — tap ▶ Resume.';
+ $('regen').textContent='▶ Resume';$('regen').onclick=()=>{$('regen').textContent='🔄 Regenerate';$('regen').onclick=()=>play(cur,0);play(cur,S.pos||0)}}
 </script></body></html>
