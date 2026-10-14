@@ -76,9 +76,10 @@ $('list').onclick=e=>{const li=e.target.closest('li');if(li)play(+li.dataset.i,0
 
 /* ---------- Upload with progress ---------- */
 function upState(cls,msg,pct){const u=$('up');u.style.display='block';u.className=cls||'';$('upMsg').textContent=msg;$('upPct').textContent=pct||'';}
-$('file').onchange=()=>{
+$('file').onchange=async()=>{
  const files=[...$('file').files];if(!files.length)return;
- const fd=new FormData();files.forEach(f=>fd.append('files',f));
+ const fd=new FormData();
+ for(const f of files){try{const b=await f.arrayBuffer();fd.append('files',new Blob([b],{type:f.type||'application/octet-stream'}),f.name)}catch(e){upState('err',`❌ Couldn't read "${f.name}" from your phone. If it's in Google Drive/iCloud, download it to the phone first, then try again.`);$('file').value='';return}}
  const total=files.reduce((a,f)=>a+f.size,0),bar=$('upProg'),fill=bar.firstElementChild;
  bar.classList.remove('proc');fill.style.width='0%';$('upBtn').classList.add('busy');
  upState('',`Uploading ${files.length} file(s)…`,`0% · 0.0 / ${mb(total)} MB`);
